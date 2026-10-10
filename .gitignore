@@ -7,3 +7,5 @@ dist
 
 # Documents privés (PRD, recherche, compliance): jamais sur GitHub
 private-docs/
+
+.vite
