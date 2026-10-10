@@ -567,9 +567,14 @@ export function createApi({ config, db, signer, screening, chain, now = Date.now
 
       const row = db.prepare('SELECT json FROM policies WHERE account_id = ?').get(s.account_id)
       const policy = row ? JSON.parse(row.json) : defaultPolicy()
+      // Ce qui compte dans le plafond de 24 h: ce qui est parti, ce qui a été autorisé pour signer (même si le client n'en rapporte pas
+      // l'issue, ou annonce un échec), et les décisions encore valables, réservées. Une décision jamais utilisée et expirée est libérée:
+      // contrôler un transfert n'est pas le dépenser.
       const spent = db
-        .prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM authorizations WHERE account_id = ? AND chain = ? AND status IN ('cleared', 'broadcast') AND created_at > ?")
-        .get(s.account_id, chain, now() - 24 * 3_600_000).total
+        .prepare(
+          "SELECT COALESCE(SUM(amount), 0) AS total FROM authorizations WHERE account_id = ? AND chain = ? AND created_at > ? AND status != 'refused' AND (signing_at IS NOT NULL OR status = 'broadcast' OR (status = 'cleared' AND expires_at > ?))",
+        )
+        .get(s.account_id, chain, now() - 24 * 3_600_000, now()).total
       const verdict = evaluate(policy, { chain, to, amount }, spent)
       if (!verdict.allowed) reasons.push(...verdict.reasons)
 

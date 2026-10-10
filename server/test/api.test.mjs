@@ -260,6 +260,52 @@ test('limite journalière: appliquée côté banque sur 24 h glissantes', async 
   }
 })
 
+const LIMIT_03 = { policy: { maxPerTx: { BTC: 1, EVM: 1, SOL: 1 }, maxPerDay: { BTC: 0.03, EVM: 1, SOL: 1 }, allowlist: { BTC: [], EVM: [], SOL: [] }, blockUnknownDestinations: false } }
+
+test("limite journalière: un contrôle jamais suivi d'un envoi est libéré quand la décision expire", async () => {
+  const fx = await startFixture({ overrides: { sessionTtlSeconds: 3 * 24 * 3600 } })
+  try {
+    const c = await signedUp(fx)
+    assert.equal((await c.put('/api/policy', LIMIT_03)).status, 200)
+    assert.equal((await check(c, 'BTC', CLEAN.BTC, 0.02)).json.allowed, true)
+    const reserved = await check(c, 'BTC', CLEAN.BTC, 0.02)
+    assert.equal(reserved.json.allowed, false, 'réservé tant que la décision est valable')
+    assert.match(reserved.json.reasons.join(' '), /Daily limit exceeded/)
+    fx.advance(11 * 60)
+    assert.equal((await check(c, 'BTC', CLEAN.BTC, 0.02)).json.allowed, true, 'décision expirée et jamais utilisée: elle ne compte plus')
+  } finally {
+    await fx.close()
+  }
+})
+
+test("limite journalière: une décision utilisée pour signer compte pendant 24 h, qu'elle soit rapportée, oubliée ou annoncée en échec", async () => {
+  const fx = await startFixture({ overrides: { sessionTtlSeconds: 3 * 24 * 3600 } })
+  try {
+    const c = await signedUp(fx)
+    assert.equal((await c.put('/api/policy', LIMIT_03)).status, 200)
+    // Autorisée pour signer (mot de passe: compte sans passkey), puis jamais rapportée.
+    const forgotten = await check(c, 'BTC', CLEAN.BTC, 0.02)
+    assert.equal((await c.post('/api/authorize/begin', { action: 'sign', authorizationId: forgotten.json.authorizationId, password: PASSWORD })).status, 200)
+    fx.advance(11 * 60)
+    assert.equal((await check(c, 'BTC', CLEAN.BTC, 0.02)).json.allowed, false, 'une signature autorisée compte même sans rapport')
+    fx.advance(25 * 3600)
+    // Autorisée pour signer, puis le client annonce un échec: il ne peut pas se libérer en le disant.
+    const failed = await check(c, 'BTC', CLEAN.BTC, 0.02)
+    assert.equal(failed.json.allowed, true)
+    assert.equal((await c.post('/api/authorize/begin', { action: 'sign', authorizationId: failed.json.authorizationId, password: PASSWORD })).status, 200)
+    assert.equal((await c.post('/api/transfers/report', { authorizationId: failed.json.authorizationId, error: 'network error' })).status, 200)
+    assert.equal((await check(c, 'BTC', CLEAN.BTC, 0.02)).json.allowed, false, 'un « échec » annoncé après la signature compte aussi')
+    // Un échec annoncé SANS avoir signé libère la décision: rien n'est parti.
+    fx.advance(25 * 3600)
+    const unsigned = await check(c, 'BTC', CLEAN.BTC, 0.02)
+    assert.equal(unsigned.json.allowed, true)
+    assert.equal((await c.post('/api/transfers/report', { authorizationId: unsigned.json.authorizationId, error: 'user cancelled' })).status, 200)
+    assert.equal((await check(c, 'BTC', CLEAN.BTC, 0.02)).json.allowed, true, 'jamais signée: libérée')
+  } finally {
+    await fx.close()
+  }
+})
+
 test('liste approuvée: refuse l\'inconnu, accepte l\'approuvé (EVM insensible à la casse)', async () => {
   const fx = await startFixture()
   try {
