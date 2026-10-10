@@ -1,0 +1,5 @@
+# Données locales: base SQLite, clé de signature, cache de la liste de sanctions
+data/
+# Socket Unix de l'API (déploiement) et réglages propres à une machine
+run/
+.env
