@@ -198,13 +198,19 @@ function Overview({ setTab, goTransfer, notify }: { setTab: (t: TabId) => void; 
 
 /* ---------- send and receive ---------- */
 
+/** Sur téléphone, les onglets défilent sur une ligne: l'onglet choisi se place entièrement à l'écran. */
+function showTab(e: { currentTarget: HTMLElement }, select: () => void) {
+  select()
+  e.currentTarget.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+}
+
 function Transfer({ tab, setTab, receiveChain, notify }: { tab: TransferTab; setTab: (t: TransferTab) => void; receiveChain: Chain; notify: (m: string) => void }) {
   return (
     <div className="stack">
       <div className="subtabs" role="tablist" aria-label="Send and receive sections">
         <div>
           {TRANSFER.map((s) => (
-            <button key={s.id} role="tab" aria-selected={tab === s.id} className={tab === s.id ? 'on' : ''} onClick={() => setTab(s.id)}>
+            <button key={s.id} role="tab" aria-selected={tab === s.id} className={tab === s.id ? 'on' : ''} onClick={(e) => showTab(e, () => setTab(s.id))}>
               <s.icon size={16} aria-hidden="true" /> {s.label}
             </button>
           ))}
@@ -255,7 +261,7 @@ function Settings({
       <div className="subtabs" role="tablist" aria-label="Profile sections">
         <div>
           {PROFILE.map((s) => (
-            <button key={s.id} role="tab" aria-selected={tab === s.id} className={tab === s.id ? 'on' : ''} onClick={() => setTab(s.id)}>
+            <button key={s.id} role="tab" aria-selected={tab === s.id} className={tab === s.id ? 'on' : ''} onClick={(e) => showTab(e, () => setTab(s.id))}>
               <s.icon size={16} aria-hidden="true" /> {s.label}
             </button>
           ))}

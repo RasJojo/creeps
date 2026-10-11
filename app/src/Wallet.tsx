@@ -373,7 +373,7 @@ export function ReceivePanel({ notify, initial = 'BTC' }: { notify: Notify; init
         <div className="receive">
           <AnimatePresence mode="wait">
             <motion.div key={chain} className="qr" initial={{ opacity: 0, scale: 0.94 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }}>
-              <QRCodeSVG value={address} size={188} bgColor="#ffffff" fgColor="#121212" level="M" marginSize={2} title={`${meta.network} address QR code`} />
+              <QRCodeSVG value={address} size={188} bgColor="#ffffff" fgColor="#323232" level="M" marginSize={2} title={`${meta.network} address QR code`} />
             </motion.div>
           </AnimatePresence>
           <div className="stack grow">
