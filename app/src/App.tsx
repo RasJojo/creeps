@@ -1,24 +1,33 @@
-import { useRef, useState, type ComponentProps } from 'react'
+import { useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   ArrowDownLeft,
   ArrowLeftRight,
   ArrowUpRight,
   Check,
-  CreditCard,
-  FileCheck2,
+  CircleUser,
+  ExternalLink,
   History as HistoryIcon,
-  KeyRound,
   LayoutDashboard,
-  Lock,
+  LifeBuoy,
   LogOut,
   PanelLeftClose,
   PanelLeftOpen,
+  RefreshCw,
+  Scale,
+  ShieldCheck,
+  Wallet,
 } from 'lucide-react'
-import { ASSETS, DEMO_REG, chf, nameFromEmail, qtyFmt, randomHex, seedRows, short, START_QTY, useFlash, useLive, when, type Reg, type Row } from './data'
-import { Auth } from './Auth'
-import { Access, History, Registration, Vault, Wordmark } from './Panels'
-import { BuyPanel, Holdings, ReceivePanel, SendPanel } from './Wallet'
+import { dateTime, nameFromEmail, short } from './util'
+import { DIRECTION_LABEL, History, statusOf, useActivity, Wordmark } from './Panels'
+import { ReceivePanel, SendPanel, CopyShare } from './Wallet'
+import { BankRules, RecoveryPanel, SecurityPanel, WalletsPanel } from './Security'
+import { AccessProvider, useAccess, type Backend } from './access/AccessProvider'
+import { PendingRequests } from './access/PasskeyRequest'
+import { AccessScreens } from './access/screens'
+import { ChainProvider, useChainData } from './chain/ChainProvider'
+import { CHAINS, CHAIN_META, formatAmount } from './chain/meta'
+import type { Chain } from './provider/types'
 
 const NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -30,14 +39,14 @@ type TabId = (typeof NAV)[number]['id'] | 'settings'
 const TRANSFER = [
   { id: 'send', label: 'Send', icon: ArrowUpRight },
   { id: 'receive', label: 'Receive', icon: ArrowDownLeft },
-  { id: 'buy', label: 'Buy crypto', icon: CreditCard },
 ] as const
 type TransferTab = (typeof TRANSFER)[number]['id']
 
 const PROFILE = [
-  { id: 'registration', label: 'Registration', icon: FileCheck2 },
-  { id: 'access', label: 'IDs and passwords', icon: KeyRound },
-  { id: 'vault', label: 'Secret key', icon: Lock },
+  { id: 'wallets', label: 'Wallets', icon: Wallet },
+  { id: 'security', label: 'Security', icon: ShieldCheck },
+  { id: 'recovery', label: 'Recovery', icon: LifeBuoy },
+  { id: 'rules', label: 'Bank rules and audit', icon: Scale },
 ] as const
 type ProfileTab = (typeof PROFILE)[number]['id']
 
@@ -48,110 +57,131 @@ const TITLES: Record<TabId, string> = {
   settings: 'Profile and settings',
 }
 
-/* ---------- chart ---------- */
-
-function Spark({ data }: { data: number[] }) {
-  const W = 640
-  const H = 150
-  const pad = 8
-  const min = Math.min(...data)
-  const max = Math.max(...data)
-  const x = (i: number) => pad + (i / (data.length - 1)) * (W - pad * 2)
-  const y = (v: number) => H - pad - ((v - min) / (max - min || 1)) * (H - pad * 2)
-  const d = data.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ')
-  const last = data[data.length - 1]
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="spark" role="img" aria-label="Portfolio value over the last 90 seconds">
-      <path d={`${d} L${x(data.length - 1)} ${H} L${x(0)} ${H} Z`} className="spark-area" />
-      <path d={d} className="spark-line" />
-      <circle cx={x(data.length - 1)} cy={y(last)} r="9" className="spark-ring" />
-      <circle cx={x(data.length - 1)} cy={y(last)} r="4" className="spark-dot" />
-    </svg>
-  )
-}
-
 /* ---------- overview ---------- */
 
-function Overview({
-  live,
-  qty,
-  rows,
-  setTab,
-  goTransfer,
-}: {
-  live: ReturnType<typeof useLive>
-  qty: Record<string, number>
-  rows: Row[]
-  setTab: (t: TabId) => void
-  goTransfer: (t: TransferTab) => void
-}) {
-  const { total, hist, prices } = live
-  const delta = total - hist[0]
-  const flash = useFlash(total)
-  const pending = rows.filter((r) => r.status !== 'Settled')
+function Overview({ setTab, goTransfer, notify }: { setTab: (t: TabId) => void; goTransfer: (t: TransferTab, chain?: Chain) => void; notify: (m: string) => void }) {
+  const a = useAccess()
+  const { data, errors, loading, refresh } = useChainData()
+  const { rows } = useActivity()
+  const accounts = a.snapshot.accounts
+  const funded = CHAINS.some((c) => (data[c]?.balance ?? 0) > 0)
+  const loaded = CHAINS.every((c) => data[c] || errors[c])
+  const others = a.pendingRequests.filter((r) => r.scope === 'passkey:enroll')
+  const passkeyCount = a.passkeys ? a.passkeys.length : null
+  const needs = others.length > 0 || passkeyCount === 0 || passkeyCount === 1 || (loaded && !funded)
+
   return (
     <div className="stack">
-      <div className="panel hero">
-        <div className="hero-top">
-          <div>
-            <span className="dim">Total held in your institutional wallet</span>
-            <div className={`total num flash ${flash}`}>{chf(total)}</div>
-            <div className={`delta num ${delta >= 0 ? 'pos' : 'neg'}`}>
-              {delta >= 0 ? '+' : ''}
-              {chf(delta)} over the chart period
-            </div>
-          </div>
-          <div className="actions">
-            <button className="btn" onClick={() => goTransfer('send')}>
-              Send <ArrowUpRight size={15} />
-            </button>
-            <button className="btn ghost" onClick={() => goTransfer('buy')}>
-              Buy crypto
-            </button>
-          </div>
+      <div>
+        <div className="row between gap">
+          <h2>Your wallets</h2>
+          <button className="btn ghost sm" onClick={() => void refresh()} disabled={loading}>
+            <RefreshCw size={15} className={loading ? 'spin' : ''} aria-hidden="true" /> Refresh
+          </button>
         </div>
-        <Spark data={hist} />
-        <div className="alloc" aria-label="Allocation by asset">
-          {ASSETS.map((a) => (
-            <motion.i
-              key={a.sym}
-              layout
-              style={{ background: a.color }}
-              animate={{ flexGrow: Math.max(1, ((qty[a.sym] * prices[a.sym]) / total) * 100) }}
-              title={a.name}
-            />
-          ))}
-        </div>
-        <div className="legend">
-          {ASSETS.map((a) => (
-            <span key={a.sym}>
-              <i style={{ background: a.color }} />
-              {a.sym} <span className="num dim">{chf(prices[a.sym])}</span>
-            </span>
-          ))}
-        </div>
+        <p className="dim">One wallet per network, all protected by your passkey and your passcode. Test networks only: the coins have no value.</p>
       </div>
 
-      <Holdings qty={qty} prices={prices} total={total} />
+      <div className="tiles">
+        {CHAINS.map((c) => {
+          const m = CHAIN_META[c]
+          const acc = accounts.find((x) => x.chain === c)
+          const info = data[c]
+          return (
+            <div key={c} className="panel tile stack">
+              <div className="row between">
+                <b>{m.network}</b>
+                <span className="tag">{m.testnet}</span>
+              </div>
+              <div className="total num">
+                {info ? formatAmount(info.balance, c) : errors[c] ? '-' : '…'} <span className="dim">{m.unit}</span>
+              </div>
+              {errors[c] && <p className="hint">{errors[c]}</p>}
+              {acc && (
+                <div className="row gap">
+                  <code className="addr-text" title={acc.address}>
+                    {short(acc.address)}
+                  </code>
+                </div>
+              )}
+              <div className="row gap wrap">
+                <button className="btn ghost sm" onClick={() => goTransfer('receive', c)}>
+                  <ArrowDownLeft size={14} aria-hidden="true" /> Receive
+                </button>
+                <button className="btn ghost sm" onClick={() => goTransfer('send', c)} disabled={!info || info.balance <= 0}>
+                  <ArrowUpRight size={14} aria-hidden="true" /> Send
+                </button>
+                {acc && (
+                  <a className="btn ghost sm" href={m.explorer(acc.address)} target="_blank" rel="noreferrer">
+                    <ExternalLink size={14} aria-hidden="true" /> Explorer
+                  </a>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
 
       <div className="cols">
         <div className="panel stack">
           <h2>Needs your attention</h2>
-          {pending.length === 0 ? (
-            <p className="empty">Nothing is waiting. New transfers that need approval will appear here.</p>
+          {!needs ? (
+            <p className="empty">Nothing is waiting.</p>
           ) : (
             <ul className="attn">
-              {pending.slice(0, 4).map((r) => (
-                <li key={r.id}>
-                  <span className={`pill ${r.status === 'Pending' ? 'warn' : 'info'}`}>{r.status}</span>
+              {others.length > 0 && (
+                <li>
+                  <span className="pill warn">Security</span>
                   <span>
-                    <b>{r.id}</b>{' '}
-                    <span className="dim">
-                      {r.kind.toLowerCase()} · {r.note}
-                    </span>
+                    <b>A new passkey was requested for your account.</b> <span className="dim">If it was not you, cancel it now.</span>
                   </span>
-                  <span className="num">
-                    {qtyFmt(Math.abs(r.qty), r.sym)} {r.sym}
+                </li>
+              )}
+              {passkeyCount === 1 && (
+                <li>
+                  <span className="pill info">Advice</span>
+                  <span>
+                    <b>You have a single passkey.</b> <span className="dim">Add a second one on another device so a lost phone does not lock you out.</span>
+                  </span>
+                  <button className="btn ghost sm" onClick={() => setTab('settings')}>
+                    Open security
+                  </button>
+                </li>
+              )}
+              {loaded && !funded && (
+                <li>
+                  <span className="pill info">Start</span>
+                  <span>
+                    <b>Your wallets are empty.</b> <span className="dim">Get free test coins, then they show up here.</span>
+                  </span>
+                  <button className="btn ghost sm" onClick={() => goTransfer('receive')}>
+                    Get an address
+                  </button>
+                </li>
+              )}
+            </ul>
+          )}
+          <PendingRequests canContinue={false} />
+          <CopyShare value={accounts.map((x) => `${CHAIN_META[x.chain].network}: ${x.address}`).join('\n')} title="My addresses" what="Addresses" notify={notify} disabled={accounts.length === 0} />
+        </div>
+
+        <div className="panel stack">
+          <h2>Latest activity</h2>
+          {rows.length === 0 ? (
+            <p className="empty">No transaction yet. Fund a wallet with test coins, or send one once it has a balance.</p>
+          ) : (
+            <ul className="attn">
+              {rows.slice(0, 6).map((r) => (
+                <li key={`${r.chain}-${r.hash}`}>
+                  <span className="num dim">{r.time ? dateTime(r.time) : 'Pending'}</span>
+                  <span>
+                    <b>{DIRECTION_LABEL[r.direction]}</b> <span className="dim">{CHAIN_META[r.chain].network}</span>
+                    {!r.ok && <span className="pill bad">Failed</span>}
+                    {r.ok && !r.confirmed && <span className={`pill ${statusOf(r).tone}`}>Pending</span>}
+                  </span>
+                  <span className={`num ${r.direction === 'in' ? 'pos' : r.direction === 'out' ? 'neg' : ''}`}>
+                    {r.direction === 'in' ? '+' : r.direction === 'out' ? '-' : ''}
+                    {formatAmount(r.amount, r.chain)} {CHAIN_META[r.chain].unit}
                   </span>
                 </li>
               ))}
@@ -161,24 +191,6 @@ function Overview({
             Open transaction history
           </button>
         </div>
-
-        <div className="panel stack">
-          <h2>Latest entries</h2>
-          <ul className="attn">
-            {rows.slice(0, 5).map((r) => (
-              <li key={r.id}>
-                <span className="num dim">{when(r.ts)}</span>
-                <span>
-                  <b>{r.kind}</b> <span className="dim">{r.note}</span>
-                </span>
-                <span className={`num ${r.qty >= 0 ? 'pos' : 'neg'}`}>
-                  {r.qty >= 0 ? '+' : ''}
-                  {qtyFmt(r.qty, r.sym)} {r.sym}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
       </div>
     </div>
   )
@@ -186,40 +198,23 @@ function Overview({
 
 /* ---------- send and receive ---------- */
 
-function Transfer({
-  tab,
-  setTab,
-  live,
-  qty,
-  onSend,
-  onBuy,
-  notify,
-}: {
-  tab: TransferTab
-  setTab: (t: TransferTab) => void
-  live: ReturnType<typeof useLive>
-  qty: Record<string, number>
-  onSend: ComponentProps<typeof SendPanel>['onSend']
-  onBuy: ComponentProps<typeof BuyPanel>['onBuy']
-  notify: (m: string) => void
-}) {
+function Transfer({ tab, setTab, receiveChain, notify }: { tab: TransferTab; setTab: (t: TransferTab) => void; receiveChain: Chain; notify: (m: string) => void }) {
   return (
     <div className="stack">
       <div className="subtabs" role="tablist" aria-label="Send and receive sections">
         <div>
           {TRANSFER.map((s) => (
             <button key={s.id} role="tab" aria-selected={tab === s.id} className={tab === s.id ? 'on' : ''} onClick={() => setTab(s.id)}>
-              <s.icon size={16} /> {s.label}
+              <s.icon size={16} aria-hidden="true" /> {s.label}
             </button>
           ))}
         </div>
       </div>
 
       <AnimatePresence mode="wait">
-        <motion.div key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.16 }}>
-          {tab === 'send' && <SendPanel qty={qty} prices={live.prices} onSend={onSend} notify={notify} />}
-          {tab === 'receive' && <ReceivePanel notify={notify} />}
-          {tab === 'buy' && <BuyPanel prices={live.prices} onBuy={onBuy} notify={notify} />}
+        <motion.div key={tab + receiveChain} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.16 }}>
+          {tab === 'send' && <SendPanel notify={notify} />}
+          {tab === 'receive' && <ReceivePanel notify={notify} initial={receiveChain} />}
         </motion.div>
       </AnimatePresence>
     </div>
@@ -229,17 +224,15 @@ function Transfer({
 /* ---------- profile and settings ---------- */
 
 function Settings({
-  reg,
+  email,
   owner,
-  approvers,
   tab,
   setTab,
   notify,
   onSignOut,
 }: {
-  reg: Reg
+  email: string
   owner: string
-  approvers: [string, string][]
   tab: ProfileTab
   setTab: (t: ProfileTab) => void
   notify: (m: string) => void
@@ -251,13 +244,11 @@ function Settings({
         <span className="avatar big">{owner.slice(0, 1)}</span>
         <div className="grow">
           <h2>{owner}</h2>
-          <span className="dim">
-            {reg.email} · {reg.legal}
-          </span>
+          <span className="dim">{email}</span>
         </div>
-        <span className={`pill ${reg.status === 'Active' ? 'ok' : 'warn'}`}>{reg.status}</span>
+        <span className="pill ok">Signed in through the bank</span>
         <button className="btn ghost" onClick={onSignOut}>
-          <LogOut size={15} /> Sign out
+          <LogOut size={15} aria-hidden="true" /> Sign out
         </button>
       </div>
 
@@ -265,7 +256,7 @@ function Settings({
         <div>
           {PROFILE.map((s) => (
             <button key={s.id} role="tab" aria-selected={tab === s.id} className={tab === s.id ? 'on' : ''} onClick={() => setTab(s.id)}>
-              <s.icon size={16} /> {s.label}
+              <s.icon size={16} aria-hidden="true" /> {s.label}
             </button>
           ))}
         </div>
@@ -273,9 +264,10 @@ function Settings({
 
       <AnimatePresence mode="wait">
         <motion.div key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.16 }}>
-          {tab === 'registration' && <Registration reg={reg} />}
-          {tab === 'access' && <Access notify={notify} reg={reg} owner={owner} />}
-          {tab === 'vault' && <Vault notify={notify} owner={owner} approvers={approvers} />}
+          {tab === 'wallets' && <WalletsPanel notify={notify} />}
+          {tab === 'security' && <SecurityPanel notify={notify} />}
+          {tab === 'recovery' && <RecoveryPanel />}
+          {tab === 'rules' && <BankRules notify={notify} />}
         </motion.div>
       </AnimatePresence>
     </div>
@@ -284,74 +276,36 @@ function Settings({
 
 /* ---------- app ---------- */
 
-export function App() {
-  const [reg, setReg] = useState<Reg | null>(null)
+function Shell() {
+  const access = useAccess()
+  const email = access.email ?? ''
   const [tab, setTab] = useState<TabId>('overview')
   const [xTab, setXTab] = useState<TransferTab>('send')
-  const [pTab, setPTab] = useState<ProfileTab>('registration')
+  const [receiveChain, setReceiveChain] = useState<Chain>('BTC')
+  const [pTab, setPTab] = useState<ProfileTab>('wallets')
   const [open, setOpen] = useState(false)
-  const [qty, setQty] = useState<Record<string, number>>(START_QTY)
-  const [rows, setRows] = useState<Row[]>(() => seedRows())
   const [toasts, setToasts] = useState<{ id: number; msg: string }[]>([])
-  const nextId = useRef(4822)
-  const feed = useLive(qty)
+  const nextToast = useRef(0)
+  const { rows } = useActivity()
 
   const notify = (msg: string) => {
-    const id = Date.now() + Math.random()
+    const id = ++nextToast.current
     setToasts((t) => [...t, { id, msg }])
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3800)
   }
 
-  const goTransfer = (t: TransferTab = xTab) => {
+  const goTransfer = (t: TransferTab, chain?: Chain) => {
+    if (chain) setReceiveChain(chain)
     setXTab(t)
     setTab('transfer')
   }
 
-  const onSend = ({ sym, amt, fee, to, memo }: { sym: string; amt: number; fee: number; to: string; memo: string }) => {
-    const id = `TX-${nextId.current++}`
-    const hash = '0x' + randomHex(64)
-    setQty((q) => ({ ...q, [sym]: q[sym] - amt - fee }))
-    setRows((r) => [
-      { id, ts: Date.now(), kind: 'Transfer', sym, qty: -amt, note: memo || `To ${short(to)}`, status: 'Pending', hash },
-      { id: `TX-${nextId.current++}`, ts: Date.now(), kind: 'Fee', sym, qty: -fee, note: 'Network fee', status: 'Pending', hash },
-      ...r,
-    ])
-    return { id, hash }
-  }
-
-  const onBuy = ({ sym, qty: bought, method }: { sym: string; qty: number; method: string; chfPaid: number }) => {
-    const id = `TX-${nextId.current++}`
-    setQty((q) => ({ ...q, [sym]: q[sym] + bought }))
-    setRows((r) => [
-      { id, ts: Date.now(), kind: 'Deposit', sym, qty: bought, note: `Purchase by ${method.toLowerCase()}`, status: method === 'Bank transfer' ? 'Pending' : 'Settled', hash: '0x' + randomHex(64) },
-      ...r,
-    ])
-    return id
-  }
-
-  if (!reg) {
-    return (
-      <Auth
-        onEnter={(r) => {
-          setReg(r)
-          setTab('overview')
-          setXTab('send')
-          setPTab('registration')
-        }}
-      />
-    )
-  }
-
-  const owner = nameFromEmail(reg.email)
-  const signers = reg.people.filter((p) => p.role !== 'Viewer').slice(0, 2)
-  const approvers: [string, string][] = [
-    ...signers.map((p) => [p.name, p.role] as [string, string]),
-    ...(DEMO_REG.people.map((p) => [p.name, p.role]) as [string, string][]),
-  ].slice(0, 2) as [string, string][]
-  const pendingCount = rows.filter((r) => r.status === 'Pending').length
+  const owner = nameFromEmail(email)
+  const pendingCount = rows.filter((r) => !r.confirmed && r.ok).length
 
   return (
     <div className={`app ${open ? '' : 'collapsed'}`}>
+      <a className="skip-link" href="#main">Skip to main content</a>
       <aside className={`rail ${open ? '' : 'collapsed'}`}>
         <div className="rail-head">
           <Wordmark />
@@ -359,7 +313,7 @@ export function App() {
             {open ? <PanelLeftClose size={20} /> : <PanelLeftOpen size={20} />}
           </button>
         </div>
-        <p className="entity">{reg.legal}</p>
+        <p className="entity">Self-custody wallet</p>
 
         <nav aria-label="Main">
           {NAV.map((t) => (
@@ -375,40 +329,81 @@ export function App() {
           <span className="avatar sm">{owner.slice(0, 1)}</span>
           <span className="label who">
             <b>{owner}</b>
-            <small>{reg.email}</small>
+            <small>{email}</small>
           </span>
         </button>
       </aside>
 
-      <div className="main">
+      <main className="main" id="main">
         <header className="top">
           <h1>{TITLES[tab]}</h1>
         </header>
 
+        {access.passkeys?.length === 0 && (
+          <div className="banner" role="status">
+            <ShieldCheck size={18} aria-hidden="true" />
+            <span>Your account has no passkey yet. Without one, a transfer needs only your password, and a stolen session could move your funds.</span>
+            <button
+              className="btn sm"
+              onClick={() => {
+                setPTab('security')
+                setTab('settings')
+              }}
+            >
+              Add a passkey
+            </button>
+          </div>
+        )}
+
         <AnimatePresence mode="wait">
           <motion.section key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }}>
-            {tab === 'overview' && <Overview live={feed} qty={qty} rows={rows} setTab={setTab} goTransfer={goTransfer} />}
-            {tab === 'transfer' && (
-              <Transfer tab={xTab} setTab={setXTab} live={feed} qty={qty} onSend={onSend} onBuy={onBuy} notify={notify} />
+            {tab === 'overview' && (
+              <Overview
+                setTab={(t) => {
+                  if (t === 'settings') setPTab('security')
+                  setTab(t)
+                }}
+                goTransfer={goTransfer}
+                notify={notify}
+              />
             )}
-            {tab === 'history' && <History rows={rows} prices={feed.prices} notify={notify} />}
+            {tab === 'transfer' && <Transfer tab={xTab} setTab={setXTab} receiveChain={receiveChain} notify={notify} />}
+            {tab === 'history' && <History notify={notify} />}
             {tab === 'settings' && (
               <Settings
-                reg={reg}
+                email={email}
                 owner={owner}
-                approvers={approvers}
                 tab={pTab}
                 setTab={setPTab}
                 notify={notify}
                 onSignOut={() => {
-                  setReg(null)
                   setOpen(false)
+                  void access.signOut()
                 }}
               />
             )}
           </motion.section>
         </AnimatePresence>
-      </div>
+      </main>
+
+      {/* Navigation du pouce, sur téléphone et tablette (sur ordinateur, c'est la colonne de gauche). */}
+      <nav className="tabbar" aria-label="Main">
+        {NAV.map((t) => (
+          <button key={t.id} className={tab === t.id ? 'on' : ''} onClick={() => setTab(t.id)} aria-current={tab === t.id ? 'page' : undefined}>
+            <span className="tab-icon">
+              <t.icon size={22} aria-hidden="true" />
+              {t.id === 'history' && pendingCount > 0 && <em aria-label={`${pendingCount} pending`}>{pendingCount}</em>}
+            </span>
+            <span>{t.id === 'transfer' ? 'Send & receive' : t.id === 'history' ? 'History' : 'Overview'}</span>
+          </button>
+        ))}
+        <button className={tab === 'settings' ? 'on' : ''} onClick={() => setTab('settings')} aria-current={tab === 'settings' ? 'page' : undefined}>
+          <span className="tab-icon">
+            <CircleUser size={22} aria-hidden="true" />
+          </span>
+          <span>Profile</span>
+        </button>
+      </nav>
 
       <div className="toasts" aria-live="polite">
         <AnimatePresence>
@@ -420,5 +415,25 @@ export function App() {
         </AnimatePresence>
       </div>
     </div>
+  )
+}
+
+/* ---------- porte d'accès ---------- */
+
+function Gate() {
+  const a = useAccess()
+  if (a.snapshot.state !== 'ready') return <AccessScreens />
+  return (
+    <ChainProvider>
+      <Shell />
+    </ChainProvider>
+  )
+}
+
+export function App({ backend }: { backend?: Backend } = {}) {
+  return (
+    <AccessProvider backend={backend}>
+      <Gate />
+    </AccessProvider>
   )
 }

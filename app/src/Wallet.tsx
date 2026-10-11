@@ -1,34 +1,18 @@
-import { useState, type ReactNode } from 'react'
+import { useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { QRCodeSVG } from 'qrcode.react'
-import { AlertTriangle, Banknote, Check, ClipboardPaste, Copy, CreditCard, Landmark, Loader2, Share2 } from 'lucide-react'
-import {
-  ASSETS,
-  FEES_CHF,
-  MY_ADDRESS,
-  NETWORKS,
-  NET_ASSETS,
-  SAVED,
-  chf,
-  copyText,
-  qtyFmt,
-  shareOrCopy,
-  short,
-  useFlash,
-  validateAddress,
-  type Network,
-} from './data'
+import { AlertTriangle, Check, ClipboardPaste, Copy, ExternalLink, Fingerprint, Loader2, RefreshCw, Share2, X } from 'lucide-react'
+import { copyText, parseAmount, shareOrCopy, short, validateAddress } from './util'
 import { Field } from './Panels'
+import { useAccess } from './access/AccessProvider'
+import { type TransferVerdict } from './bank/api'
+import { CHAINS, CHAIN_META, formatAmount } from './chain/meta'
+import { useChainData } from './chain/ChainProvider'
+import type { Chain } from './provider/types'
 
 type Notify = (msg: string) => void
-type Prices = Record<string, number>
-type Qty = Record<string, number>
 
-function Flash({ v, children }: { v: number; children: ReactNode }) {
-  return <span className={`flash ${useFlash(v)}`}>{children}</span>
-}
-
-function RuleCheck({ ok, children }: { ok: boolean; children: ReactNode }) {
+function RuleCheck({ ok, children }: { ok: boolean; children: React.ReactNode }) {
   return (
     <li className={ok ? 'ok' : 'bad'}>
       {ok ? <Check size={14} /> : <AlertTriangle size={14} />}
@@ -37,17 +21,12 @@ function RuleCheck({ ok, children }: { ok: boolean; children: ReactNode }) {
   )
 }
 
-/** Copy + Share pair used by Send and Receive. Both need a non-empty value. */
-function CopyShare({ value, title, what, notify, disabled }: { value: string; title: string; what: string; notify: Notify; disabled?: boolean }) {
+/** Copier + partager, pour une adresse ou un reçu. Les deux exigent une valeur non vide. */
+export function CopyShare({ value, title, what, notify, disabled }: { value: string; title: string; what: string; notify: Notify; disabled?: boolean }) {
   const off = disabled || !value
   return (
     <div className="row gap">
-      <button
-        type="button"
-        className="btn ghost"
-        disabled={off}
-        onClick={async () => notify((await copyText(value)) ? `${what} copied` : 'Copy was blocked by the browser')}
-      >
+      <button type="button" className="btn ghost" disabled={off} onClick={async () => notify((await copyText(value)) ? `${what} copied` : 'Copy was blocked by the browser')}>
         <Copy size={15} /> Copy
       </button>
       <button
@@ -67,77 +46,18 @@ function CopyShare({ value, title, what, notify, disabled }: { value: string; ti
   )
 }
 
-/* ------------------------------------------------------------------ */
-/* Ledger page: holdings                                               */
-/* ------------------------------------------------------------------ */
-
-export function Holdings({ qty, prices, total }: { qty: Qty; prices: Prices; total: number }) {
-  const biggest = [...ASSETS].sort((a, b) => qty[b.sym] * prices[b.sym] - qty[a.sym] * prices[a.sym])[0]
+/** Erreur de la dernière action (refus de la banque, passkey annulé, réseau...). */
+export function ErrorNote() {
+  const a = useAccess()
+  if (!a.error && a.cooldownLeft === 0) return null
   return (
-    <div className="stack">
-      <div className="tiles">
-        <div className="panel tile">
-          <span className="dim">Total value</span>
-          <b className="num">{chf(total)}</b>
-        </div>
-        <div className="panel tile">
-          <span className="dim">Largest holding</span>
-          <b>
-            {biggest.sym} <span className="dim num">{Math.round(((qty[biggest.sym] * prices[biggest.sym]) / total) * 100)}%</span>
-          </b>
-        </div>
-        <div className="panel tile">
-          <span className="dim">Assets on</span>
-          <b>{NETWORKS.length} networks</b>
-        </div>
-      </div>
-
-      <div className="panel flush">
-        <div className="scroll-x">
-          <table className="ledger">
-            <thead>
-              <tr>
-                <th>Asset</th>
-                <th>Network</th>
-                <th className="r">Balance</th>
-                <th className="r">Price</th>
-                <th className="r">Value</th>
-                <th>Share</th>
-              </tr>
-            </thead>
-            <tbody>
-              {ASSETS.map((a) => {
-                const v = qty[a.sym] * prices[a.sym]
-                return (
-                  <tr key={a.sym}>
-                    <td>
-                      <span className="coin" style={{ background: a.color }}>
-                        {a.sym.slice(0, 1)}
-                      </span>
-                      <b>{a.sym}</b> <span className="dim">{a.name}</span>
-                    </td>
-                    <td>
-                      <span className="tag">{a.chain}</span>
-                    </td>
-                    <td className="r num">{qtyFmt(qty[a.sym], a.sym)}</td>
-                    <td className="r num">
-                      <Flash v={prices[a.sym]}>{chf(prices[a.sym])}</Flash>
-                    </td>
-                    <td className="r num">
-                      <Flash v={v}>{chf(v)}</Flash>
-                    </td>
-                    <td className="share">
-                      <span className="bar">
-                        <i style={{ width: `${(v / total) * 100}%`, background: a.color }} />
-                      </span>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
+    <div className="stack" aria-live="polite">
+      {a.error && (
+        <p className="hint" role="alert">
+          {a.error.message}
+        </p>
+      )}
+      {a.cooldownLeft > 0 && <p className="dim">Pausing for {a.cooldownLeft} s so we do not overload the service.</p>}
     </div>
   )
 }
@@ -146,227 +66,281 @@ export function Holdings({ qty, prices, total }: { qty: Qty; prices: Prices; tot
 /* Send                                                                */
 /* ------------------------------------------------------------------ */
 
-type SendArgs = { sym: string; amt: number; fee: number; to: string; memo: string }
-type Receipt = { id: string; hash: string; sym: string; amt: number; to: string; network: string }
+type Sent = { hash: string; chain: Chain; amount: string; to: string }
 
-export function SendPanel({
-  qty,
-  prices,
-  onSend,
-  notify,
-}: {
-  qty: Qty
-  prices: Prices
-  onSend: (a: SendArgs) => { id: string; hash: string }
-  notify: Notify
-}) {
-  const DAILY = 1000000
-  const [sym, setSym] = useState('USDC')
+export function SendPanel({ notify }: { notify: Notify }) {
+  const a = useAccess()
+  const { data, errors, refresh } = useChainData()
+  const [chain, setChain] = useState<Chain>('BTC')
   const [to, setTo] = useState('')
   const [amount, setAmount] = useState('')
-  const [memo, setMemo] = useState('')
-  const [step, setStep] = useState<'form' | 'review' | 'sending' | 'done'>('form')
-  const [receipt, setReceipt] = useState<Receipt | null>(null)
-  const [sentToday, setSentToday] = useState(180000)
+  const [step, setStep] = useState<'form' | 'review' | 'done'>('form')
+  const [verdict, setVerdict] = useState<TransferVerdict | null>(null)
+  const [sent, setSent] = useState<Sent | null>(null)
 
-  const asset = ASSETS.find((a) => a.sym === sym)!
-  const network = asset.chain
-  const feeChf = FEES_CHF[network]
-  const fee = feeChf / prices[sym]
-  const amt = parseFloat(amount.replace(',', '.')) || 0
-  const valueChf = amt * prices[sym]
-  const addrOk = validateAddress(network, to)
-  const balanceOk = amt > 0 && amt + fee <= qty[sym]
-  const limitOk = valueChf + sentToday <= DAILY
-  const approvals = valueChf > 250000 ? 2 : 1
-  const canReview = addrOk && balanceOk && limitOk
-  const saved = SAVED.filter((s) => s.network === network)
+  const meta = CHAIN_META[chain]
+  const exact = parseAmount(amount)
+  const balance = data[chain]?.balance
+  const fee = data[chain]?.estimatedFee ?? 0
+  const recipient = to.trim()
+  const addrOk = validateAddress(chain, recipient)
+  const fundsOk = exact !== null && balance !== undefined && Number(exact) + fee <= balance + 1e-12
+  const canAsk = addrOk && fundsOk && !a.busy && a.cooldownLeft === 0
+  const locked = step !== 'form' || !!a.busy
+  const expired = !!verdict?.expiresAt && Date.now() > verdict.expiresAt
+  const edited = () => {
+    setVerdict(null)
+    setStep('form')
+  }
 
-  const addrMsg = !to.trim()
-    ? 'An address is required.'
-    : addrOk
-      ? `Valid ${network} address.`
-      : `This is not a valid ${network} address. Check it character by character.`
+  const addrMsg = !recipient ? 'An address is required.' : addrOk ? `Looks like a ${meta.network} test address.` : `This is not a ${meta.network} test-network address. Check it character by character.`
 
   async function paste() {
     try {
       setTo((await navigator.clipboard.readText()).trim())
+      edited()
     } catch {
       notify('The browser blocked pasting. Paste with Ctrl+V instead.')
     }
   }
 
-  function confirm() {
-    setStep('sending')
-    setTimeout(() => {
-      const r = onSend({ sym, amt, fee, to: to.trim(), memo })
-      setReceipt({ ...r, sym, amt, to: to.trim(), network })
-      setSentToday((s) => s + valueChf)
-      setStep('done')
-    }, 1700)
+  /** La banque regarde le transfert avant que le client ne signe. Elle peut refuser, jamais initier ni signer. */
+  async function askBank() {
+    if (exact === null) return
+    const out: { v?: TransferVerdict } = {}
+    const ok = await a.act('Asking the bank', async () => {
+      out.v = await a.bank.checkTransfer({ chain, to: recipient, amount: Number(exact) })
+    })
+    if (!ok || !out.v) return
+    setVerdict(out.v)
+    setStep(out.v.allowed ? 'review' : 'form')
+  }
+
+  /** Autorisation de signer par la banque (passkey du client, lié à ce transfert), puis signature MPC (la part du client et celle du fournisseur), puis diffusion. La banque est informée du résultat. */
+  async function confirm() {
+    if (exact === null || !verdict?.authorizationId) return
+    const authorizationId = verdict.authorizationId
+    const out: { hash?: string; unrecorded?: boolean } = {}
+    const ok = await a.act('Signing', async () => {
+      // Un passkey refusé n'engage rien: la décision de la banque reste valable et le client peut réessayer.
+      await a.authorize({ authorizationId })
+      try {
+        out.hash = (await a.wallet.sendNative(chain, recipient, exact)).hash
+      } catch (e) {
+        await a.bank.reportTransfer({ authorizationId, error: e instanceof Error ? e.message : 'failed' }).catch(() => undefined)
+        throw e
+      }
+      await a.bank.reportTransfer({ authorizationId, hash: out.hash }).catch(() => (out.unrecorded = true))
+    })
+    if (!ok || !out.hash) return
+    setSent({ hash: out.hash, chain, amount: exact, to: recipient })
+    setStep('done')
+    if (out.unrecorded) notify('Sent, but the bank could not record it')
+    window.setTimeout(() => void refresh(), 4000)
   }
 
   function again() {
     setTo('')
     setAmount('')
-    setMemo('')
-    setReceipt(null)
+    setSent(null)
+    setVerdict(null)
     setStep('form')
   }
 
-  const receiptText = receipt
-    ? `creeps transfer ${receipt.id}\n${qtyFmt(receipt.amt, receipt.sym)} ${receipt.sym} on ${receipt.network}\nTo: ${receipt.to}\nHash: ${receipt.hash}`
-    : ''
-
-  if (step === 'done' && receipt)
+  if (step === 'done' && sent) {
+    const m = CHAIN_META[sent.chain]
+    const receipt = `creeps transfer\n${sent.amount} ${m.unit} on ${m.testnet}\nTo: ${sent.to}\nTransaction: ${sent.hash}\n${m.txUrl(sent.hash)}`
     return (
       <div className="panel narrow stack">
         <div className="done-mark">
-          <Check size={22} />
+          <Check size={22} aria-hidden="true" />
         </div>
-        <h2>Sent for approval</h2>
-        <p className="dim">The transfer is in the transaction history as pending. It leaves the wallet once {approvals} approver{approvals > 1 ? 's have' : ' has'} signed.</p>
+        <h2>Transfer sent</h2>
+        <p className="dim">
+          Signed with your passkey, your share and the provider's share, then broadcast on {m.testnet}. It appears in your history once the network has seen it, which can
+          take a few minutes.
+        </p>
         <dl className="review">
-          <dt>Reference</dt>
-          <dd className="num">{receipt.id}</dd>
           <dt>Amount</dt>
           <dd className="num">
-            {qtyFmt(receipt.amt, receipt.sym)} {receipt.sym}
+            {sent.amount} {m.unit}
           </dd>
           <dt>To</dt>
           <dd>
-            <code>{receipt.to}</code>
+            <code>{sent.to}</code>
           </dd>
-          <dt>Hash</dt>
+          <dt>Transaction</dt>
           <dd>
-            <code>{receipt.hash}</code>
+            <code>{sent.hash}</code>
           </dd>
         </dl>
         <div className="row gap wrap">
-          <CopyShare value={receiptText} title={`Transfer ${receipt.id}`} what="Receipt" notify={notify} />
+          <a className="btn ghost" href={m.txUrl(sent.hash)} target="_blank" rel="noreferrer">
+            <ExternalLink size={15} aria-hidden="true" /> Open in the explorer
+          </a>
+          <CopyShare value={receipt} title="Transfer receipt" what="Receipt" notify={notify} />
           <button className="btn" onClick={again}>
             Send another
           </button>
         </div>
       </div>
     )
+  }
 
   return (
     <div className="cols">
       <div className="panel stack">
         <h2>Send</h2>
+        <p className="dim">Test networks only. The balance is read from the network; the check by the bank and the signature are real.</p>
 
         <div className="grid2">
-          <Field label="Asset">
-            <select value={sym} onChange={(e) => { setSym(e.target.value); setTo(''); setStep('form') }} disabled={step !== 'form'}>
-              {ASSETS.map((a) => (
-                <option key={a.sym} value={a.sym}>
-                  {a.sym} · {qtyFmt(qty[a.sym], a.sym)} available
+          <Field label="Network">
+            <select
+              name="network"
+              value={chain}
+              onChange={(e) => {
+                setChain(e.target.value as Chain)
+                setTo('')
+                edited()
+              }}
+              disabled={locked}
+            >
+              {CHAINS.map((c) => (
+                <option key={c} value={c}>
+                  {CHAIN_META[c].network} · {data[c] ? `${formatAmount(data[c]!.balance, c)} ${CHAIN_META[c].unit} available` : errors[c] ? 'balance unavailable' : 'reading balance…'}
                 </option>
               ))}
             </select>
           </Field>
-          <Field label="Network">
+          <Field label="Test network">
             <div className="static">
-              <span className="tag">{network}</span>
+              <span className="tag">{meta.testnet}</span>
             </div>
           </Field>
         </div>
 
         <Field label="Recipient address (required)">
           <input
+            name="recipient"
+            autoComplete="off"
             value={to}
-            onChange={(e) => setTo(e.target.value)}
-            disabled={step !== 'form'}
-            placeholder={network === 'Ethereum' ? '0x…' : network === 'Solana' ? 'Solana address' : 'bc1…'}
+            onChange={(e) => {
+              setTo(e.target.value)
+              edited()
+            }}
+            disabled={locked}
+            placeholder={chain === 'EVM' ? '0x…' : chain === 'SOL' ? 'Solana address…' : 'tb1…'}
             spellCheck={false}
             aria-invalid={!!to && !addrOk}
           />
         </Field>
         <p className={`msg ${to && addrOk ? 'ok' : 'bad'}`}>{addrMsg}</p>
         <div className="row gap wrap">
-          <button type="button" className="btn ghost sm" onClick={paste} disabled={step !== 'form'}>
-            <ClipboardPaste size={14} /> Paste
+          <button type="button" className="btn ghost sm" onClick={paste} disabled={locked}>
+            <ClipboardPaste size={14} aria-hidden="true" /> Paste
           </button>
-          <CopyShare value={to.trim()} title="Recipient address" what="Address" notify={notify} disabled={!addrOk} />
         </div>
-        {saved.length > 0 && (
-          <div className="chips">
-            {saved.map((s) => (
-              <button key={s.address} type="button" className="chip" disabled={step !== 'form'} onClick={() => setTo(s.address)} title={s.address}>
-                {s.label}
-              </button>
-            ))}
-          </div>
-        )}
 
-        <Field label={`Amount in ${sym}${amt > 0 ? ` · ${chf(valueChf)}` : ''}`}>
+        <Field label={`Amount in ${meta.unit}`}>
           <div className="pw">
-            <input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} disabled={step !== 'form'} placeholder="0.00" />
+            <input
+              name="amount"
+              inputMode="decimal"
+              autoComplete="off"
+              value={amount}
+              onChange={(e) => {
+                setAmount(e.target.value)
+                edited()
+              }}
+              disabled={locked}
+              placeholder="0.00"
+              aria-invalid={!!amount && exact === null}
+            />
             <button
               type="button"
               className="maxbtn"
-              disabled={step !== 'form'}
-              onClick={() => setAmount(String(Math.max(0, qty[sym] - fee).toFixed(sym === 'USDC' ? 2 : 6)))}
+              disabled={locked || balance === undefined}
+              onClick={() => {
+                setAmount(formatAmount(Math.max(0, (balance ?? 0) - fee * 1.2), chain))
+                edited()
+              }}
             >
               Max
             </button>
           </div>
         </Field>
-        <Field label="Reference (optional)">
-          <input value={memo} onChange={(e) => setMemo(e.target.value)} disabled={step !== 'form'} placeholder="Invoice or internal note" />
-        </Field>
+        {amount && exact === null && <p className="hint">Enter a number greater than zero, with at most 18 decimals.</p>}
 
         {step === 'form' && (
-          <button className="btn" disabled={!canReview} onClick={() => setStep('review')}>
-            Review transfer
+          <button className="btn" disabled={!canAsk} onClick={() => void askBank()}>
+            Ask the bank to check this transfer
           </button>
         )}
 
+        {verdict && !verdict.allowed && (
+          <div className="lp-verdict-inline no" role="alert">
+            <X size={18} aria-hidden="true" />
+            <div>
+              <strong>The bank refuses this transfer</strong>
+              <p>{verdict.reasons.join('. ')}.</p>
+              <p className="dim">Change the amount or the address, or update your limits in Profile, Bank rules.</p>
+            </div>
+          </div>
+        )}
+
         <AnimatePresence>
-          {step !== 'form' && (
+          {step === 'review' && verdict?.allowed && (
             <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="review-box">
               <dl className="review">
                 <dt>You send</dt>
                 <dd className="num">
-                  {qtyFmt(amt, sym)} {sym}
+                  {exact} {meta.unit}
                 </dd>
                 <dt>To</dt>
                 <dd>
-                  <code>{short(to)}</code>
+                  <code>{short(recipient)}</code>
                 </dd>
                 <dt>Network fee</dt>
-                <dd className="num">{chf(feeChf)}</dd>
-                <dt>Approvals</dt>
-                <dd>{approvals} needed</dd>
+                <dd className="num">about {formatAmount(fee, chain)} {meta.unit}</dd>
+                <dt>Bank check</dt>
+                <dd>{expired ? 'Expired, check again' : 'Cleared'}</dd>
               </dl>
+              <p className="dim">Your passkey confirms this transfer. Check the address one last time: a crypto transfer cannot be undone.</p>
               <div className="row gap">
-                <button className="btn" onClick={confirm} disabled={step === 'sending'}>
-                  {step === 'sending' ? <Loader2 size={16} className="spin" /> : null}
-                  {step === 'sending' ? 'Sending…' : 'Send'}
+                <button className="btn" onClick={() => void confirm()} disabled={!!a.busy || expired || a.cooldownLeft > 0}>
+                  {a.busy ? <Loader2 size={16} className="spin" aria-hidden="true" /> : <Fingerprint size={16} aria-hidden="true" />}
+                  {a.busy ? `${a.busy}…` : 'Confirm with passkey and send'}
                 </button>
-                <button className="btn ghost" onClick={() => setStep('form')} disabled={step === 'sending'}>
+                <button className="btn ghost" onClick={edited} disabled={!!a.busy}>
                   Edit
                 </button>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
+        <ErrorNote />
       </div>
 
       <div className="panel stack">
         <h2>Before it goes out</h2>
         <ul className="checks">
-          <RuleCheck ok={addrOk}>{addrOk ? `Address is valid on ${network}` : `Enter a valid ${network} address`}</RuleCheck>
-          <RuleCheck ok={balanceOk}>
-            {amt === 0 ? 'Enter an amount' : balanceOk ? 'Balance covers the amount and the fee' : 'Amount plus fee is more than your balance'}
+          <RuleCheck ok={addrOk}>{addrOk ? `Address has the ${meta.network} test-network form` : `Enter a ${meta.network} test-network address`}</RuleCheck>
+          <RuleCheck ok={fundsOk}>
+            {exact === null
+              ? 'Enter an amount'
+              : balance === undefined
+                ? 'Reading your balance…'
+                : fundsOk
+                  ? 'Balance covers the amount and the estimated fee'
+                  : 'Amount plus estimated fee is more than your balance'}
           </RuleCheck>
-          <RuleCheck ok={limitOk}>{limitOk ? `Within the daily limit (${chf(Math.max(0, DAILY - sentToday - valueChf))} left)` : `Over the daily limit of ${chf(DAILY)}`}</RuleCheck>
-          <RuleCheck ok>
-            {approvals} approver{approvals > 1 ? 's' : ''} needed for this amount
+          <RuleCheck ok={!verdict || verdict.allowed}>
+            {!verdict ? 'The bank checks limits and sanctions when you ask' : verdict.allowed ? 'Cleared by the bank' : `Refused by the bank: ${verdict.reasons.join('. ')}`}
           </RuleCheck>
         </ul>
-        <p className="dim">Crypto transfers can't be undone. Send a small test amount first when the address is new.</p>
+        <p className="dim">
+          The bank can refuse a transfer. It cannot start one or sign it. Crypto transfers cannot be undone, so send a small test amount first when the address is new.
+        </p>
       </div>
     </div>
   )
@@ -376,180 +350,64 @@ export function SendPanel({
 /* Receive                                                             */
 /* ------------------------------------------------------------------ */
 
-export function ReceivePanel({ notify }: { notify: Notify }) {
-  const [net, setNet] = useState<Network>('Ethereum')
-  const address = MY_ADDRESS[net]
+export function ReceivePanel({ notify, initial = 'BTC' }: { notify: Notify; initial?: Chain }) {
+  const a = useAccess()
+  const { data, errors, loading, refresh } = useChainData()
+  const [chain, setChain] = useState<Chain>(initial)
+  const meta = CHAIN_META[chain]
+  const address = a.snapshot.accounts.find((x) => x.chain === chain)?.address ?? ''
+  const info = data[chain]
+
   return (
     <div className="panel narrow stack">
       <h2>Receive</h2>
-      <div className="chips">
-        {NETWORKS.map((n) => (
-          <button key={n} className={`chip ${net === n ? 'on' : ''}`} onClick={() => setNet(n)}>
-            {n}
+      <div className="chips" role="group" aria-label="Network">
+        {CHAINS.map((c) => (
+          <button key={c} className={`chip ${chain === c ? 'on' : ''}`} onClick={() => setChain(c)} aria-pressed={chain === c}>
+            {CHAIN_META[c].network}
           </button>
         ))}
       </div>
 
-      <div className="receive">
-        <AnimatePresence mode="wait">
-          <motion.div key={net} className="qr" initial={{ opacity: 0, scale: 0.94 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }}>
-            <QRCodeSVG value={address} size={188} bgColor="#ffffff" fgColor="#12201d" level="M" marginSize={2} title={`${net} address QR code`} />
-          </motion.div>
-        </AnimatePresence>
-        <div className="stack grow">
-          <div>
-            <span className="dim">Your {net} address</span>
-            <div className="addr-box">
-              <code>{address}</code>
+      {address ? (
+        <div className="receive">
+          <AnimatePresence mode="wait">
+            <motion.div key={chain} className="qr" initial={{ opacity: 0, scale: 0.94 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }}>
+              <QRCodeSVG value={address} size={188} bgColor="#ffffff" fgColor="#121212" level="M" marginSize={2} title={`${meta.network} address QR code`} />
+            </motion.div>
+          </AnimatePresence>
+          <div className="stack grow">
+            <div>
+              <span className="dim">Your {meta.network} address</span>
+              <div className="addr-box">
+                <code>{address}</code>
+              </div>
             </div>
-          </div>
-          <CopyShare value={address} title={`My ${net} address`} what="Address" notify={notify} />
-          <p className="dim">
-            Only send {NET_ASSETS[net].join(' or ')} on {net} to this address. Anything else may be lost for good.
-          </p>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/* ------------------------------------------------------------------ */
-/* Buy crypto                                                          */
-/* ------------------------------------------------------------------ */
-
-const METHODS = [
-  { id: 'card', label: 'Card', fee: 0.019, icon: CreditCard, note: 'Instant' },
-  { id: 'bank', label: 'Bank transfer', fee: 0.004, icon: Landmark, note: '1 working day' },
-  { id: 'account', label: 'Swissquote account', fee: 0.0025, icon: Banknote, note: 'Instant' },
-] as const
-type MethodId = (typeof METHODS)[number]['id']
-
-export function BuyPanel({
-  prices,
-  onBuy,
-  notify,
-}: {
-  prices: Prices
-  onBuy: (a: { sym: string; qty: number; method: string; chfPaid: number }) => string
-  notify: Notify
-}) {
-  const [sym, setSym] = useState('BTC')
-  const [chfStr, setChfStr] = useState('1000')
-  const [method, setMethod] = useState<MethodId>('card')
-  const [step, setStep] = useState<'form' | 'confirm' | 'processing' | 'done'>('form')
-  const [quote, setQuote] = useState({ price: 0, out: 0 })
-  const [doneId, setDoneId] = useState('')
-
-  const m = METHODS.find((x) => x.id === method)!
-  const pay = parseFloat(chfStr.replace(',', '.')) || 0
-  const max = method === 'card' ? 10000 : 50000
-  const valid = pay >= 50 && pay <= max
-  const feeAmt = pay * m.fee
-  const out = (pay - feeAmt) / prices[sym]
-
-  function lockQuote() {
-    setQuote({ price: prices[sym], out })
-    setStep('confirm')
-  }
-
-  function buy() {
-    setStep('processing')
-    setTimeout(() => {
-      setDoneId(onBuy({ sym, qty: quote.out, method: m.label, chfPaid: pay }))
-      setStep('done')
-      notify(`Purchase complete: ${qtyFmt(quote.out, sym)} ${sym}`)
-    }, 1800)
-  }
-
-  if (step === 'done')
-    return (
-      <div className="panel narrow stack">
-        <div className="done-mark">
-          <Check size={22} />
-        </div>
-        <h2>
-          You bought {qtyFmt(quote.out, sym)} {sym}
-        </h2>
-        <p className="dim">
-          {method === 'bank'
-            ? `It will be added once your bank transfer arrives. Reference ${doneId}.`
-            : `It is already in your wallet. Reference ${doneId}.`}
-        </p>
-        <button className="btn fit" onClick={() => setStep('form')}>
-          Buy more
-        </button>
-      </div>
-    )
-
-  return (
-    <div className="cols">
-      <div className="panel stack">
-        <h2>Buy crypto</h2>
-        <Field label="What do you want to buy?">
-          <select value={sym} onChange={(e) => setSym(e.target.value)} disabled={step !== 'form'}>
-            {ASSETS.map((a) => (
-              <option key={a.sym} value={a.sym}>
-                {a.name} ({a.sym}) · {chf(prices[a.sym])}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="You pay (CHF)">
-          <input inputMode="decimal" value={chfStr} onChange={(e) => setChfStr(e.target.value)} disabled={step !== 'form'} />
-        </Field>
-        <div className="chips">
-          {[500, 1000, 5000, 10000].map((n) => (
-            <button key={n} className="chip" disabled={step !== 'form'} onClick={() => setChfStr(String(n))}>
-              {n.toLocaleString('de-CH')}
-            </button>
-          ))}
-        </div>
-        {!valid && <p className="hint">{pay < 50 ? 'The minimum purchase is CHF 50.' : `The maximum with ${m.label.toLowerCase()} is ${chf(max)}.`}</p>}
-
-        <Field label="Pay with">
-          <div className="methods">
-            {METHODS.map((x) => (
-              <button key={x.id} type="button" className={method === x.id ? 'on' : ''} disabled={step !== 'form'} onClick={() => setMethod(x.id)}>
-                <x.icon size={18} />
-                <b>{x.label}</b>
-                <span className="dim">
-                  {x.note} · {(x.fee * 100).toFixed(2).replace(/\.?0+$/, '')}% fee
-                </span>
+            <CopyShare value={address} title={`My ${meta.network} address`} what="Address" notify={notify} />
+            <div className="row gap wrap">
+              <span className="num">
+                {info ? `${formatAmount(info.balance, chain)} ${meta.unit}` : errors[chain] ? 'Balance unavailable' : 'Reading balance…'}
+              </span>
+              <button className="btn ghost sm" onClick={() => void refresh()} disabled={loading}>
+                {loading ? <Loader2 size={14} className="spin" aria-hidden="true" /> : <RefreshCw size={14} aria-hidden="true" />} Refresh
               </button>
-            ))}
+              <a className="btn ghost sm" href={meta.explorer(address)} target="_blank" rel="noreferrer">
+                <ExternalLink size={14} aria-hidden="true" /> Explorer
+              </a>
+            </div>
+            {errors[chain] && <p className="hint">{errors[chain]}</p>}
+            <p className="dim">
+              Only send {meta.unit} on {meta.testnet} to this address. This is a test network: the coins have no value, and anything else may be lost for good.{' '}
+              <a href={meta.faucet} target="_blank" rel="noreferrer">
+                Get free test coins
+              </a>{' '}
+              (third-party faucet).
+            </p>
           </div>
-        </Field>
-
-        {step === 'form' && (
-          <button className="btn" disabled={!valid} onClick={lockQuote}>
-            See the quote
-          </button>
-        )}
-      </div>
-
-      <div className="panel stack">
-        <h2>{step === 'form' ? 'Estimate' : 'Your quote'}</h2>
-        <dl className="review">
-          <dt>Price</dt>
-          <dd className="num">{chf(step === 'form' ? prices[sym] : quote.price)} per {sym}</dd>
-          <dt>Fee</dt>
-          <dd className="num">{valid ? chf(feeAmt) : '–'}</dd>
-          <dt>You get</dt>
-          <dd className="num strong">{valid ? `${qtyFmt(step === 'form' ? out : quote.out, sym)} ${sym}` : '–'}</dd>
-        </dl>
-        {step === 'form' && <p className="dim">The price moves every few seconds. The quote is fixed when you click the button below.</p>}
-        {step !== 'form' && (
-          <div className="row gap">
-            <button className="btn" onClick={buy} disabled={step === 'processing'}>
-              {step === 'processing' ? <Loader2 size={16} className="spin" /> : null}
-              {step === 'processing' ? 'Buying…' : `Pay ${chf(pay)}`}
-            </button>
-            <button className="btn ghost" onClick={() => setStep('form')} disabled={step === 'processing'}>
-              Change
-            </button>
-          </div>
-        )}
-      </div>
+        </div>
+      ) : (
+        <p className="empty">No {meta.network} wallet yet.</p>
+      )}
     </div>
   )
 }
